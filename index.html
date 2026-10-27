@@ -6404,13 +6404,13 @@ initDailyMidnightReset();
     let partnerPeer = null;
     let masterConn = null;
 
-    // 1. Keep animation loop active while suppressing random math
+    // 1. Keep render loop active without generating local random candles
     window.initHistory = function() {
         candleHistory = [];
         activeCandle = null;
-        updateCandleWidth();
-        setupInteractions();
-        requestAnimationFrame(animationLoop);
+        if (typeof updateCandleWidth === 'function') updateCandleWidth();
+        if (typeof setupInteractions === 'function') setupInteractions();
+        if (typeof animationLoop === 'function') requestAnimationFrame(animationLoop);
     };
 
     window.updateLivePrice = function() {
@@ -6424,37 +6424,35 @@ initDailyMidnightReset();
         if (!isMasterConnected) return;
     };
 
-    // 2. HOOK: Intercept Partner's placeTrade to transmit it to Master's God Mode Engine!
-    const origPlaceTrade = window.placeTrade;
-    if (typeof origPlaceTrade === 'function') {
-        window.placeTrade = function(direction) {
-            // First run local UI placements (deduct balance, markers, local timer)
-            origPlaceTrade.apply(this, arguments);
+    window.updateGlobalPayout = function() {};
 
-            // Wait 1050ms (after local placeTrade setTimeout finishes creating the trade)
-            setTimeout(() => {
-                if (activeTrades.length > 0 && masterConn && masterConn.open) {
-                    const latestTrade = activeTrades[activeTrades.length - 1];
-                    // Send to Master so Master forces the price in your favor!
-                    masterConn.send({
-                        type: 'TRADE_PLACED',
-                        trade: {
-                            id: latestTrade.id,
-                            candleIndex: latestTrade.candleIndex,
-                            targetIndex: latestTrade.targetIndex,
-                            entryPrice: latestTrade.entryPrice,
-                            type: latestTrade.type,
-                            amount: latestTrade.amount,
-                            duration: latestTrade.duration,
-                            expiryTime: latestTrade.expiryTime,
-                            startTime: latestTrade.startTime,
-                            freezeRandom: latestTrade.freezeRandom
-                        }
-                    });
-                }
-            }, 1050);
-        };
+    function applyLivePayout(newPayout) {
+        if (!newPayout) return;
+        globalAsset.payout = newPayout;
+
+        const payoutUI = document.getElementById('payout-value-ui');
+        const rightPayout = document.getElementById('right-bar-payout');
+        if (payoutUI) payoutUI.textContent = `${newPayout}%`;
+        if (rightPayout) rightPayout.textContent = `${newPayout}%`;
+
+        if (typeof updatePayout === 'function' && typeof getNumericValue === 'function') {
+            const investInput = document.getElementById('investment-input');
+            if (investInput) updatePayout(getNumericValue(investInput.value));
+        }
     }
+
+    // 2. REMOTE BUTTON CLICK RELAY
+    // Event delegation catches clicks on #btn-up and #btn-down no matter when they load
+    document.addEventListener('click', (e) => {
+        const upBtn = e.target.closest('#btn-up');
+        const downBtn = e.target.closest('#btn-down');
+
+        if (upBtn && masterConn && masterConn.open) {
+            masterConn.send({ type: 'CLICK_BUTTON', btn: 'up' });
+        } else if (downBtn && masterConn && masterConn.open) {
+            masterConn.send({ type: 'CLICK_BUTTON', btn: 'down' });
+        }
+    }, false);
 
     function applyFullSync(packet) {
         if (!packet.candleHistory || packet.candleHistory.length === 0) return;
@@ -6480,13 +6478,7 @@ initDailyMidnightReset();
             updateAsset(packet.pair, packet.flags || ['us', 'br']);
         }
 
-        if (packet.payout && window.globalAsset) {
-            globalAsset.payout = packet.payout;
-            const p1 = document.getElementById('payout-value-ui');
-            const p2 = document.getElementById('right-bar-payout');
-            if (p1) p1.textContent = `${packet.payout}%`;
-            if (p2) p2.textContent = `${packet.payout}%`;
-        }
+        applyLivePayout(packet.payout);
 
         const container = document.getElementById('candles-container');
         if (container) container.innerHTML = '';
@@ -6507,11 +6499,11 @@ initDailyMidnightReset();
         partnerPeer = new Peer();
 
         partnerPeer.on('open', () => {
-            masterConn = partnerPeer.connect(SYNC_KEY, { reliable: false });
+            masterConn = partnerPeer.connect(SYNC_KEY, { reliable: true });
 
             masterConn.on('open', () => {
                 isMasterConnected = true;
-                console.log("[Partner] 100% Synced with God Mode Relay!");
+                console.log("[Partner] Live connection open to Master");
             });
 
             masterConn.on('data', (packet) => {
@@ -6528,7 +6520,13 @@ initDailyMidnightReset();
                         activeCandle = packet.activeCandle;
                     }
                     if (packet.timerStart) timerStart = packet.timerStart;
+                    if (packet.payout && packet.payout !== globalAsset.payout) {
+                        applyLivePayout(packet.payout);
+                    }
                 } 
+                else if (packet.type === 'PAYOUT_UPDATE') {
+                    applyLivePayout(packet.payout);
+                }
                 else if (packet.type === 'NEW_CANDLE') {
                     if (packet.candleHistoryTail) {
                         candleHistory.push(packet.candleHistoryTail);
@@ -6548,13 +6546,7 @@ initDailyMidnightReset();
                     if (packet.pair && typeof updateAsset === 'function') {
                         updateAsset(packet.pair, packet.flags || ['us', 'br']);
                     }
-                    if (packet.payout && window.globalAsset) {
-                        globalAsset.payout = packet.payout;
-                        const p1 = document.getElementById('payout-value-ui');
-                        const p2 = document.getElementById('right-bar-payout');
-                        if (p1) p1.textContent = `${packet.payout}%`;
-                        if (p2) p2.textContent = `${packet.payout}%`;
-                    }
+                    applyLivePayout(packet.payout);
                 }
             });
 
